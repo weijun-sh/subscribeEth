@@ -1,0 +1,1 @@
+./subscribeEth -config="./config.toml"

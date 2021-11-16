@@ -1,0 +1,21 @@
+Endpoint = "wss://bsc-ws-node.nariox.org:443"
+
+SwapinTokens = [
+	#pairid,contractAddress,depositAddress,rpc
+	"BIFIxx,0x...,0x...,http://serverIP:port/rpc",
+]
+
+SwapoutTokens = [
+	#pairid,contractAddress,rpc
+	"BIFIxx,0x...,http://serverIP:port/rpc",
+]
+
+# modgodb database connection config
+[MongoDB]
+DBURL = "localhost:27017"
+DBName = "dbname"
+UserName = "user"
+Password = "passwd"
+Enable = true
+BlockChain = "bsc"
+
