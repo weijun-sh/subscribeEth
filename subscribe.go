@@ -23,10 +23,24 @@ import (
 )
 
 type Config struct {
-	Endpoint      string
-	SwapoutTokens []string
+	GateWay *gatewayConfig
+	MongoDB *MongoDBConfig
+	BlockChain *blockChainConfig
+	SwapPost *swappostConfig
+}
+
+type gatewayConfig struct {
+	Endpoint string
+}
+
+type blockChainConfig struct {
+	Chain string
+	SyncNumber uint64
+}
+
+type swappostConfig struct {
 	SwapinTokens  []string
-	MongoDB       *MongoDBConfig
+	SwapoutTokens []string
 }
 
 // MongoDBConfig mongodb config
@@ -36,7 +50,6 @@ type MongoDBConfig struct {
         UserName   string `json:"-"`
         Password   string `json:"-"`
         Enable     bool
-        BlockChain string
 }
 
 type swapPost struct {
@@ -85,11 +98,11 @@ func init() {
 
 func initClient(config *Config) {
 	var err error
-        clientRpc, err = ethclient.Dial(config.Endpoint)
+        clientRpc, err = ethclient.Dial(config.GateWay.Endpoint)
         if err != nil {
-                golog.Fatal("ethclient.Dial failed", "gateway", config.Endpoint, "err", err)
+                golog.Fatal("ethclient.Dial failed", "gateway", config.GateWay.Endpoint, "err", err)
         }
-        log.Info("ethclient.Dial gateway success", "gateway", config.Endpoint)
+        log.Info("ethclient.Dial gateway success", "gateway", config.GateWay.Endpoint)
 }
 
 func LoadConfig() *Config {
@@ -98,7 +111,7 @@ func LoadConfig() *Config {
 		panic(err)
 	}
 	mongodbConfig = config.MongoDB
-	chain = mongodbConfig.BlockChain
+	chain = config.BlockChain.Chain
 	mongodbEnable = mongodbConfig.Enable
         if mongodbEnable {
                 InitMongodb()
@@ -158,7 +171,7 @@ func main() {
 
 func StartSubscribeHeader(config *Config) {
 	ctx := context.Background()
-	var endpoint string = config.Endpoint
+	var endpoint string = config.GateWay.Endpoint
 
 	client, err := ethclient.DialContext(ctx, endpoint)
 	if err != nil {
@@ -185,11 +198,11 @@ func StartSubscribeHeader(config *Config) {
 
 func StartSubscribeSwapout(config *Config) {
 	log.Info("StartSubscribeSwapout")
-	if len(config.SwapoutTokens) == 0 {
+	if len(config.SwapPost.SwapoutTokens) == 0 {
 		fmt.Printf("StartSubscribeSwapout exit.\n")
 		return
 	}
-	var endpoint string = config.Endpoint
+	var endpoint string = config.GateWay.Endpoint
 
 	ctx := context.Background()
 	client, err := ethclient.DialContext(ctx, endpoint)
@@ -204,7 +217,7 @@ func StartSubscribeSwapout(config *Config) {
 	topics := make([][]common.Hash, 0)
 	topics = append(topics, []common.Hash{SwapoutTopic, BTCSwapoutTopic}) // SwapoutTopic or BTCSwapoutTopic
 
-	for _, item := range config.SwapoutTokens {
+	for _, item := range config.SwapPost.SwapoutTokens {
 		pairID := strings.Split(item, ",")[0]
 		addr := common.HexToAddress(strings.Split(item, ",")[1])
 		server := strings.Split(item, ",")[2]
@@ -267,11 +280,11 @@ func StartSubscribeSwapout(config *Config) {
 
 func StartSubscribeSwapin(config *Config) {
 	log.Info("StartSubscribeSwapin")
-	if len(config.SwapinTokens) == 0 {
+	if len(config.SwapPost.SwapinTokens) == 0 {
 		fmt.Printf("StartSubscribeSwapin exit.\n")
 		return
 	}
-	var endpoint string = config.Endpoint
+	var endpoint string = config.GateWay.Endpoint
 
 	ctx := context.Background()
 	client, err := ethclient.DialContext(ctx, endpoint)
@@ -287,7 +300,7 @@ func StartSubscribeSwapin(config *Config) {
 	var depositAddressMap = make(map[common.Address][]common.Address)
 	var serverMapErc20 = make(map[common.Address]map[common.Address]string)
 
-	for _, item := range config.SwapinTokens {
+	for _, item := range config.SwapPost.SwapinTokens {
 		itemSlice := strings.Split(item, ",")
 		tokenAddr := common.HexToAddress(itemSlice[1])
 		pairID := itemSlice[0]
