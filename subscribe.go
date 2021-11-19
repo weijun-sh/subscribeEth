@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -117,6 +118,10 @@ func LoadConfig() *Config {
                 InitMongodb()
                 go loopSwapPending()
         }
+	err := checkConfig(config)
+	if err != nil {
+		log.Crit("LoadConfig", "checkConfig err", err)
+	}
 	log.Info("Load config success", "config", config)
 	return config
 }
@@ -126,6 +131,13 @@ func InitMongodb() {
         log.Info("InitMongodb")
         dbConfig := GetMongodbConfig()
         mongodb.MongoServerInit([]string{dbConfig.DBURL}, dbConfig.DBName, dbConfig.UserName, dbConfig.Password)
+}
+
+func checkConfig(config *Config) error {
+	if config.GateWay.Endpoint == "" {
+		return errors.New("rpc Endpoint is null")
+	}
+	return nil
 }
 
 // GetMongodbConfig get mongodb config
