@@ -79,6 +79,8 @@ var (
 	mongodbEnable bool
 	mongodbConfig = &MongoDBConfig{}
 	clientRpc *ethclient.Client
+
+	exitChan chan bool = make(chan bool)
 )
 
 var (
@@ -94,7 +96,7 @@ func init() {
 	flag.StringVar(&logfilepath, "log", "", "log")
 	flag.BoolVar(&swapin, "swapin", false, "listen swapin")
 	flag.BoolVar(&swapout, "swapout", false, "listen swapout")
-	flag.IntVar(&verbosity, "verbosity", 5, "verbosity")
+	flag.IntVar(&verbosity, "verbosity", 3, "verbosity")
 }
 
 func initClient(config *Config) {
@@ -165,7 +167,7 @@ func main() {
 	config := LoadConfig()
 	initClient(config)
 
-	go StartSubscribeHeader(config)
+	//go StartSubscribeHeader(config)
 	if swapout {
 		go StartSubscribeSwapout(config)
 	} else {
@@ -176,7 +178,7 @@ func main() {
 			go StartSubscribeSwapout(config)
 		}
 	}
-	select {}
+	<-exitChan
 	fmt.Println("Exit")
 
 }
@@ -257,8 +259,7 @@ func StartSubscribeSwapout(config *Config) {
 	ch := make(chan types.Log, 128)
 	defer close(ch)
 
-	sub := LoopSubscribe(client, ctx, swapoutfq, ch)
-	defer sub.Unsubscribe()
+	go FilterLogs(client, ctx, swapoutfq, ch)
 
 	// subscribe swapout
 	for {
@@ -277,15 +278,13 @@ func StartSubscribeSwapout(config *Config) {
 			}
 
 			swaperr := DoSwap(txhash, pairID, "swap.Swapout", server)
-			if swaperr != nil {
-				addMongodbSwapPendingPost(swap)
-			} else {
-				addMongodbSwapPost(swap)
+			if mongodbEnable {
+				if swaperr != nil {
+					addMongodbSwapPendingPost(swap)
+				} else {
+					addMongodbSwapPost(swap)
+				}
 			}
-		case err := <-sub.Err():
-			log.Info("Subscribe swapout error", "error", err)
-			sub.Unsubscribe()
-			sub = LoopSubscribe(client, ctx, swapoutfq, ch)
 		}
 	}
 }
@@ -352,8 +351,7 @@ func StartSubscribeSwapin(config *Config) {
 		ch := make(chan types.Log, 128)
 		defer close(ch)
 
-		sub := LoopSubscribe(client, ctx, fq, ch)
-		defer sub.Unsubscribe()
+		go FilterLogs(client, ctx, fq, ch)
 
 		for {
 			select {
@@ -373,16 +371,14 @@ func StartSubscribeSwapin(config *Config) {
 					}
 
 					swaperr := DoSwap(txhash, pairID, "swap.Swapin", server)
-					if swaperr != nil {
-						addMongodbSwapPendingPost(swap)
-					} else {
-						addMongodbSwapPost(swap)
+					if mongodbEnable {
+						if swaperr != nil {
+							addMongodbSwapPendingPost(swap)
+						} else {
+							addMongodbSwapPost(swap)
+						}
 					}
 				}
-			case err := <-sub.Err():
-				log.Info("Subscribe swapin error", "error", err)
-				sub.Unsubscribe()
-				sub = LoopSubscribe(client, ctx, fq, ch)
 			}
 		}
 	}()
@@ -410,8 +406,7 @@ func StartSubscribeSwapin(config *Config) {
 			ch := make(chan types.Log, 128)
 			defer close(ch)
 
-			sub := LoopSubscribe(client, ctx, fq, ch)
-			defer sub.Unsubscribe()
+			go FilterLogs(client, ctx, fq, ch)
 
 			for {
 				select {
@@ -434,15 +429,13 @@ func StartSubscribeSwapin(config *Config) {
 					}
 
 					swaperr := DoSwap(txhash, pairID, "swap.Swapin", server)
-					if swaperr != nil {
-						addMongodbSwapPendingPost(swap)
-					} else {
-						addMongodbSwapPost(swap)
+					if mongodbEnable {
+						if swaperr != nil {
+							addMongodbSwapPendingPost(swap)
+						} else {
+							addMongodbSwapPost(swap)
+						}
 					}
-				case err := <-sub.Err():
-					log.Info("Subscribe swapin error", "error", err)
-					sub.Unsubscribe()
-					sub = LoopSubscribe(client, ctx, fq, ch)
 				}
 			}
 		}()
@@ -458,6 +451,40 @@ func LoopSubscribeHead(client *ethclient.Client, ctx context.Context, ch chan<- 
 		log.Info("SubscribeHead failed, retry in 1 second", "error", err)
 		time.Sleep(time.Second * 1)
 	}
+}
+
+func FilterLogs(client *ethclient.Client, ctx context.Context, fq ethereum.FilterQuery, ch chan types.Log) {
+	time.Sleep(time.Second * 10)
+	if end != 0 && start >= end {
+		log.Crit("FilterLogs", "start", start, "> end", end)
+	}
+	log.Info("FilterLogs", "start", start, "end", end)
+
+	for i := start;; i++ {
+		if end != 0 {
+			if i >= end {
+				break
+			}
+		}
+		log.Info("FilterLogs", "block", i)
+		fq.FromBlock = big.NewInt(i)
+		fq.ToBlock = big.NewInt(i+1)
+		for {
+			logs, err := client.FilterLogs(ctx, fq)
+			if err == nil {
+				//log.Info("FilterLogs", "block", i, "logs", logs)
+				for _, l := range logs {
+					ch <- l
+				}
+				break
+			}
+			log.Warn("FilterLogs failed, retry in 1 second", "error", err, "block", i)
+			time.Sleep(time.Second * 1)
+		}
+		time.Sleep(time.Second * 1)
+	}
+	log.Info("FilterLogs finished", "start", start, "end", end)
+	exitChan <- true
 }
 
 func LoopSubscribe(client *ethclient.Client, ctx context.Context, fq ethereum.FilterQuery, ch chan types.Log) ethereum.Subscription {
