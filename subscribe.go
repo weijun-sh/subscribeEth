@@ -422,7 +422,8 @@ func StartSubscribeSwapin(config *Config) {
 			ch := make(chan types.Log, 128)
 			defer close(ch)
 
-			go FilterLogs(client, ctx, fq, ch)
+	               sub := LoopSubscribe(client, ctx, fq, ch)
+	               defer sub.Unsubscribe()
 
 			for {
 				select {
