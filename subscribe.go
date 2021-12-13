@@ -36,12 +36,14 @@ type gatewayConfig struct {
 
 type blockChainConfig struct {
 	Chain string
+	ChainID string
 	SyncNumber uint64
 }
 
 type swappostConfig struct {
 	SwapinTokens  []string
 	SwapoutTokens []string
+	SwapRouter []string
 }
 
 // MongoDBConfig mongodb config
@@ -76,15 +78,19 @@ var (
 	swapout bool
 
 	chain string
+	chainID string
 	mongodbEnable bool
 	mongodbConfig = &MongoDBConfig{}
 	clientRpc *ethclient.Client
+
+	exitChan chan bool = make(chan bool)
 )
 
 var (
 	SwapoutTopic       common.Hash = common.HexToHash("0x6b616089d04950dc06c45c6dd787d657980543f89651aec47924752c7d16c888")
 	BTCSwapoutTopic    common.Hash = common.HexToHash("0x9c92ad817e5474d30a4378deface765150479363a897b0590fbb12ae9d89396b")
 	ERC20TransferTopic common.Hash = common.HexToHash("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
+	RouterAnycallTopic common.Hash = common.HexToHash("0x3d1b3d059223895589208a5541dce543eab6d5942b3b1129231a942d1c47bc45")
 )
 
 func init() {
@@ -94,7 +100,7 @@ func init() {
 	flag.StringVar(&logfilepath, "log", "", "log")
 	flag.BoolVar(&swapin, "swapin", false, "listen swapin")
 	flag.BoolVar(&swapout, "swapout", false, "listen swapout")
-	flag.IntVar(&verbosity, "verbosity", 5, "verbosity")
+	flag.IntVar(&verbosity, "verbosity", 3, "verbosity")
 }
 
 func initClient(config *Config) {
@@ -113,6 +119,7 @@ func LoadConfig() *Config {
 	}
 	mongodbConfig = config.MongoDB
 	chain = config.BlockChain.Chain
+	chainID = config.BlockChain.ChainID
 	mongodbEnable = mongodbConfig.Enable
         if mongodbEnable {
                 InitMongodb()
@@ -174,9 +181,10 @@ func main() {
 		} else {
 			go StartSubscribeSwapin(config)
 			go StartSubscribeSwapout(config)
+			go StartSubscribeRouter(config)
 		}
 	}
-	select {}
+	<-exitChan
 	fmt.Println("Exit")
 
 }
@@ -258,7 +266,7 @@ func StartSubscribeSwapout(config *Config) {
 	defer close(ch)
 
 	sub := LoopSubscribe(client, ctx, swapoutfq, ch)
-	defer sub.Unsubscribe()
+       defer sub.Unsubscribe()
 
 	// subscribe swapout
 	for {
@@ -277,10 +285,12 @@ func StartSubscribeSwapout(config *Config) {
 			}
 
 			swaperr := DoSwap(txhash, pairID, "swap.Swapout", server)
-			if swaperr != nil {
-				addMongodbSwapPendingPost(swap)
-			} else {
-				addMongodbSwapPost(swap)
+			if mongodbEnable {
+				if swaperr != nil {
+					addMongodbSwapPendingPost(swap)
+				} else {
+					addMongodbSwapPost(swap)
+				}
 			}
 		case err := <-sub.Err():
 			log.Info("Subscribe swapout error", "error", err)
@@ -352,8 +362,8 @@ func StartSubscribeSwapin(config *Config) {
 		ch := make(chan types.Log, 128)
 		defer close(ch)
 
-		sub := LoopSubscribe(client, ctx, fq, ch)
-		defer sub.Unsubscribe()
+               sub := LoopSubscribe(client, ctx, fq, ch)
+               defer sub.Unsubscribe()
 
 		for {
 			select {
@@ -373,16 +383,18 @@ func StartSubscribeSwapin(config *Config) {
 					}
 
 					swaperr := DoSwap(txhash, pairID, "swap.Swapin", server)
-					if swaperr != nil {
-						addMongodbSwapPendingPost(swap)
-					} else {
-						addMongodbSwapPost(swap)
+					if mongodbEnable {
+						if swaperr != nil {
+							addMongodbSwapPendingPost(swap)
+						} else {
+							addMongodbSwapPost(swap)
+						}
 					}
 				}
-			case err := <-sub.Err():
-				log.Info("Subscribe swapin error", "error", err)
-				sub.Unsubscribe()
-				sub = LoopSubscribe(client, ctx, fq, ch)
+                       case err := <-sub.Err():
+                               log.Info("Subscribe swapin error", "error", err)
+                               sub.Unsubscribe()
+                               sub = LoopSubscribe(client, ctx, fq, ch)
 			}
 		}
 	}()
@@ -410,8 +422,7 @@ func StartSubscribeSwapin(config *Config) {
 			ch := make(chan types.Log, 128)
 			defer close(ch)
 
-			sub := LoopSubscribe(client, ctx, fq, ch)
-			defer sub.Unsubscribe()
+			go FilterLogs(client, ctx, fq, ch)
 
 			for {
 				select {
@@ -434,15 +445,13 @@ func StartSubscribeSwapin(config *Config) {
 					}
 
 					swaperr := DoSwap(txhash, pairID, "swap.Swapin", server)
-					if swaperr != nil {
-						addMongodbSwapPendingPost(swap)
-					} else {
-						addMongodbSwapPost(swap)
+					if mongodbEnable {
+						if swaperr != nil {
+							addMongodbSwapPendingPost(swap)
+						} else {
+							addMongodbSwapPost(swap)
+						}
 					}
-				case err := <-sub.Err():
-					log.Info("Subscribe swapin error", "error", err)
-					sub.Unsubscribe()
-					sub = LoopSubscribe(client, ctx, fq, ch)
 				}
 			}
 		}()
@@ -460,6 +469,40 @@ func LoopSubscribeHead(client *ethclient.Client, ctx context.Context, ch chan<- 
 	}
 }
 
+func FilterLogs(client *ethclient.Client, ctx context.Context, fq ethereum.FilterQuery, ch chan types.Log) {
+	time.Sleep(time.Second * 10)
+	if end != 0 && start >= end {
+		log.Crit("FilterLogs", "start", start, "> end", end)
+	}
+	log.Info("FilterLogs", "start", start, "end", end)
+
+	for i := start;; i++ {
+		if end != 0 {
+			if i >= end {
+				break
+			}
+		}
+		log.Info("FilterLogs", "block", i)
+		fq.FromBlock = big.NewInt(i)
+		fq.ToBlock = big.NewInt(i+1)
+		for {
+			logs, err := client.FilterLogs(ctx, fq)
+			if err == nil {
+				//log.Info("FilterLogs", "block", i, "logs", logs)
+				for _, l := range logs {
+					ch <- l
+				}
+				break
+			}
+			log.Warn("FilterLogs failed, retry in 1 second", "error", err, "block", i)
+			time.Sleep(time.Second * 1)
+		}
+		time.Sleep(time.Second * 1)
+	}
+	log.Info("FilterLogs finished", "start", start, "end", end)
+	exitChan <- true
+}
+
 func LoopSubscribe(client *ethclient.Client, ctx context.Context, fq ethereum.FilterQuery, ch chan types.Log) ethereum.Subscription {
 	for {
 		sub, err := client.SubscribeFilterLogs(ctx, fq, ch)
@@ -473,26 +516,35 @@ func LoopSubscribe(client *ethclient.Client, ctx context.Context, fq ethereum.Fi
 }
 
 func DoSwap(txid, pairID, swapio, server string) error {
-	client := &http.Client{}
 	var data = strings.NewReader(fmt.Sprintf(`{"jsonrpc":"2.0","method":"%v","params":[{"txid":"%v","pairid":"%v"}],"id":1}`, swapio, txid, pairID))
+	return postSwap(server, data)
+}
+
+func DoSwapRouter(txid, chainID, swapio, server string) error {
+	var data = strings.NewReader(fmt.Sprintf(`{"jsonrpc":"2.0","method":"%v","params":[{"txid":"%v","chainid":"%v"}],"id":1}`, swapio, txid, chainID))
+	return postSwap(server, data)
+}
+
+func postSwap(server string, data *strings.Reader) error {
 	req, err := http.NewRequest("POST", server, data)
 	if err != nil {
-		log.Warn("Post swap error", "txid", txid, "pairID", pairID, "server", server, "error", err, "type", swapio)
+		log.Warn("Post swap error", "data", data, "server", server)
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Warn("Post swap error", "txid", txid, "pairID", pairID, "server", server, "error", err, "type", swapio)
+		log.Warn("Post swap error", "data", data, "server", server)
 		return err
 	}
 	defer resp.Body.Close()
 	bodyText, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		log.Warn("Post swap error", "txid", txid, "pairID", pairID, "server", server, "error", err, "type", swapio)
+		log.Warn("Post swap error", "data", data, "server", server)
 		return err
 	}
-	log.Info("Call swap", "response", fmt.Sprintf("%s", bodyText), "txid", txid, "pairID", pairID, "server", server, "type", swapio)
+	log.Info("Call swap", "response", fmt.Sprintf("%s", bodyText), "data", data, "server", server)
 	return nil
 }
 
@@ -544,6 +596,7 @@ func addMongodbSwapPost(swap *swapPost) {
                 Id: swap.txid,
                 Txid: swap.txid,
                 PairID: swap.pairID,
+		ChainID: chainID,
                 RpcMethod: swap.rpcMethod,
                 SwapServer: swap.swapServer,
                 Chain: chain,
@@ -557,11 +610,97 @@ func addMongodbSwapPendingPost(swap *swapPost) {
                 Id: swap.txid,
                 Txid: swap.txid,
                 PairID: swap.pairID,
+		ChainID: chainID,
                 RpcMethod: swap.rpcMethod,
                 SwapServer: swap.swapServer,
                 Chain: chain,
                 Timestamp: uint64(time.Now().Unix()),
         }
         mongodb.AddSwapPending(ms, false)
+}
+
+func StartSubscribeRouter(config *Config) {
+	log.Info("StartSubscribeRouter")
+	if len(config.SwapPost.SwapRouter) == 0 {
+		fmt.Printf("StartSubscribeRouter exit.\n")
+		return
+	}
+	var endpoint string = config.GateWay.Endpoint
+
+	ctx := context.Background()
+	client, err := ethclient.DialContext(ctx, endpoint)
+	if err != nil {
+		panic(err)
+	}
+
+	var addreeePairIDMap = make(map[common.Address]string)
+	var serverMap = make(map[common.Address]string)
+	var tokenAddresses = make([]common.Address, 0)
+
+	topics := make([][]common.Hash, 0)
+	topics = append(topics, []common.Hash{RouterAnycallTopic})
+
+	for _, item := range config.SwapPost.SwapRouter {
+		slice := strings.Split(item, ",")
+		pairID := slice[0]
+		addr := common.HexToAddress(slice[1])
+		server := slice[2]
+
+		addreeePairIDMap[addr] = pairID
+		serverMap[addr] = server
+		tokenAddresses = append(tokenAddresses, addr)
+		fmt.Printf("address: %v, pairID: %v, server: %v\n", addr, addreeePairIDMap[addr], serverMap[addr])
+	}
+
+	swapoutfq := ethereum.FilterQuery{
+		Addresses: tokenAddresses,
+		Topics:    topics,
+	}
+
+	if start > 0 {
+		swapoutfq.FromBlock = big.NewInt(start)
+	}
+	if end > 0 {
+		swapoutfq.ToBlock = big.NewInt(end)
+	}
+
+	log.Info("swapRouter fq", "swapRouterfq", swapoutfq)
+
+	ch := make(chan types.Log, 128)
+	defer close(ch)
+
+	sub := LoopSubscribe(client, ctx, swapoutfq, ch)
+	defer sub.Unsubscribe()
+
+	// subscribe swapout
+	for {
+		select {
+		case msg := <-ch:
+			log.Info("Find event", "event", msg)
+			txhash := msg.TxHash.String()
+			pairID := addreeePairIDMap[msg.Address]
+			server := serverMap[msg.Address]
+			log.Info("SwapRouter", "txhash", txhash, "msg.Address", msg.Address, "pairID", pairID, "server", server)
+			swap := &swapPost{
+			        txid:       txhash,
+			        pairID:     pairID,
+			        rpcMethod:  "swap.RegisterRouterSwap",
+			        swapServer: server,
+			}
+
+			swaperr := DoSwapRouter(txhash, chainID, "swap.RegisterRouterSwap", server)
+			if mongodbEnable {
+				if swaperr != nil {
+					addMongodbSwapPendingPost(swap)
+				} else {
+					addMongodbSwapPost(swap)
+				}
+			}
+                case err := <-sub.Err():
+                        log.Info("Subscribe swapin error", "error", err)
+                        sub.Unsubscribe()
+                        sub = LoopSubscribe(client, ctx, swapoutfq, ch)
+		}
+	}
 }
 
